@@ -1,0 +1,5 @@
+numpy
+matplotlib
+
+# Optional (only needed for visualizer.py)
+pygame
