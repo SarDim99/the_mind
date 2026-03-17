@@ -4,9 +4,6 @@ THE MIND - Common Ground Simulation
 Modeling Theory of Mind and Common Ground in Agent-Agent Interaction
 ===============================================================================
 
-Based on: Van der Meulen, Verbrugge, & Van Duijn (2024)
-"Common Ground Provides a Mental Shortcut in Agent-Agent Interaction"
-
 HYPOTHESES (from paper):
   H1: Accounting for the other's perspective using ToM increases performance
   H2: Establishing CG retains performance while decreasing active modeling
@@ -36,7 +33,7 @@ def main():
     print(f"Output directory: {OUTPUT_DIR}\n")
 
     # Run experiment
-    results = run_full_experiment(n_runs=50, num_rounds=200)
+    results = run_full_experiment(n_runs=30, num_rounds=200)
 
     # Analysis
     analyze_hypotheses(results)

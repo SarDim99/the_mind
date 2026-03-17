@@ -65,8 +65,12 @@ class Experiment:
                 agent.update_after_round(avg_score, avg_mistakes, round_num)
                 results['agent_states'][agent.agent_id].append(agent.get_state().copy())
                 
+                # Track CG state dynamically (handles revocation)
                 if agent.cg_established and agent.agent_id not in results['cg_rounds']:
                     results['cg_rounds'][agent.agent_id] = round_num
+                elif not agent.cg_established and agent.agent_id in results['cg_rounds']:
+                    # CG was revoked, remove from active CG
+                    del results['cg_rounds'][agent.agent_id]
                     
         return results
 

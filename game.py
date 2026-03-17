@@ -11,7 +11,7 @@ class TheMindGame:
     - N players, each with K cards from range [1, 100]
     - Must play all cards in ascending order (globally)
     - No communication, only observe when others play
-    - Lives system: start with L lives, lose 1 per mistake
+    - Lives system: start with K lives, lose 1 per mistake
     - Game ends when all cards played OR lives = 0
     """
 
@@ -59,7 +59,7 @@ class TheMindGame:
             if not decisions:
                 continue
 
-            # Process plays (random order for ties)
+            # Process plays
             plays_this_tick = list(decisions.items())
             random.shuffle(plays_this_tick)
 
@@ -93,10 +93,7 @@ class TheMindGame:
                     lives -= 1
                     agent.play_card(card)
 
-                    # Discard all skipped cards (cards lower than the played card
-                    # that are still in any hand). This matches The Mind rules:
-                    # when a card is played prematurely, all cards between the 
-                    # global minimum and the played card are removed from play.
+                    # Discard all skipped cards (cards lower than the played card that are still in any hand)
                     for a in agents:
                         skipped = [c for c in a.hand if c < card]
                         for sc in skipped:

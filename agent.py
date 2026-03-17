@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Dict, Tuple, Optional
 from collections import deque
+import random
 
 class Agent:
     """
@@ -21,10 +22,13 @@ class Agent:
         self.initial_wait_factor = self.wait_factor
 
         # ===== Theory of Mind: Partner Model =====
-        self.partner_wait_factor_estimate = 1.0 
+        # Initialize partner estimate to own wait_factor (egocentric projection:
+        # "I assume my partner plays like me"). This must be updated through
+        # actual observations, making CG detection dependent on real interaction.
+        self.partner_wait_factor_estimate = self.wait_factor
         self.partner_observations = deque(maxlen=100) 
-        self.tom_updates_count = 0          # Cumulative (kept for backward compat)
-        self.tom_updates_this_round = 0     # Per-round counter (reset each round)
+        self.tom_updates_count = 0          # Cumulative
+        self.tom_updates_this_round = 0     # Per-round counter
 
         # ===== Learning History =====
         self.wait_factor_history = []
@@ -35,6 +39,7 @@ class Agent:
         # ===== Common Ground State =====
         self.cg_established = False
         self.cg_round = None
+        self._cg_perf_at_establishment = 0.0
         
         # ===== Current Game State =====
         self.hand: List[int] = []
@@ -69,13 +74,11 @@ class Agent:
 
         my_lowest = min(self.hand)
         
-        # --- FIX: Gap Heuristic (Relative Timing) ---
-        # If partner just played and my card is close, play immediately.
-        # This overrides the absolute timer to prevent "drift" errors.
-        if self._check_gap_play(current_tick, my_lowest):
+        # Gap Heuristic (Relative Timing)
+        if self.use_tom and self._check_gap_play(current_tick, my_lowest):
             return True, my_lowest
 
-        # --- Standard Absolute Timing ---
+        # Standard Absolute Timing
         play_time = self.planned_play_times.get(my_lowest, float('inf'))
         if current_tick >= play_time:
             return True, my_lowest
@@ -106,27 +109,28 @@ class Agent:
 
     def observe_partner_play(self, partner_card: int, tick_played: int):
         """
-        Observe partner play. Updates two subsystems:
+        Observe partner play.
         
-        1. Gap Heuristic state (available to ALL agents, including No-ToM):
-           This is a reactive short-horizon mechanism, not a mental model.
-           It detects "my card is close to what partner just played" and
-           triggers immediate play. Both conditions receive this equally.
-           
-        2. ToM partner model (ToM agents only):
-           Infers partner's wait_factor from observed (card, tick) pairs
-           using ratio estimation + EMA smoothing. Filters low cards 
-           (< 5) due to poor signal-to-noise ratio.
+        No-ToM agents: This method returns immediately. No-ToM agents 
+        are fully egocentric — they do not use partner actions in any 
+        way (neither for short-horizon gap heuristic nor for long-term
+        strategy alignment).
+        
+        ToM agents: Updates two subsystems:
+        1. Gap Heuristic state: stores last partner card/tick for
+           short-horizon reactive play (if my card is close, play now).
+        2. Partner model (EMA): infers partner's wait_factor from 
+           observed (card, tick) pairs. Filters cards < 5 due to 
+           poor signal-to-noise ratio.
         """
-        # Always update state for Gap Heuristic (both ToM and No-ToM)
-        self.last_partner_play_tick = tick_played
-        self.last_partner_play_card = partner_card
-
-        if not self.use_tom:
+        # Always update state for Gap Heuristic
+        if self.use_tom:
+            self.last_partner_play_tick = tick_played
+            self.last_partner_play_card = partner_card
+        else:
+            # No-ToM agents ignore partner actions entirely
             return
 
-        # FIX: Low Card Filter
-        # Cards < 5 have massive variance in implied wait_factor (signal to noise ratio is bad)
         if partner_card < 5:
             return
 
@@ -136,14 +140,14 @@ class Agent:
 
         self.partner_observations.append((partner_card, tick_played, inferred_wf))
         
-        # Only increment effort if not in CG (or reduced effort in CG)
+        # Only increment effort if not in CG
         if not self.cg_established:
             self.tom_updates_count += 1
             self.tom_updates_this_round += 1
 
         # Update partner model (EMA)
         if len(self.partner_observations) >= 3:
-            # If CG established, we barely update
+            # If CG established, barely update
             alpha = 0.01 if self.cg_established else 0.15
             
             recent_wfs = [obs[2] for obs in list(self.partner_observations)[-10:]]
@@ -163,7 +167,7 @@ class Agent:
         self._last_round_effort = self.tom_updates_this_round
         self.tom_updates_this_round = 0
         
-        # FIX: Soft Freeze instead of Hard Freeze
+        # Soft Freeze instead of Hard Freeze
         effective_lr = self.learning_rate * 0.1 if self.cg_established else self.learning_rate
 
         self.score_history.append(success_rate)
@@ -191,7 +195,7 @@ class Agent:
         # Random exploration
         target_delta += np.random.normal(0, 0.02)
 
-        # FIX: Momentum Update
+        # Momentum Update
         proposed_wf = self.wait_factor + target_delta
         self.wait_factor = (0.8 * self.wait_factor) + (0.2 * proposed_wf)
         
@@ -200,30 +204,84 @@ class Agent:
         self._check_cg(round_num)
 
     def _check_cg(self, round_num: int):
-        """Check for Common Ground stability."""
-        min_round = 20
-        if round_num < min_round or len(self.wait_factor_history) < 20:
+        """
+        Check for Common Ground emergence.
+        
+        CG is established when the agent has evidence that it and its partner
+        have converged to a shared convention THROUGH mutual adaptation. This
+        requires all of the following over a stability window:
+        
+        1. CONVERGENCE: The gap between own WF and estimated partner WF must
+           have closed meaningfully relative to how far apart they started.
+           This ensures CG reflects actual alignment through modeling, not 
+           just starting close.
+           
+        2. OWN STABILITY: The agent's strategy has stopped changing.
+           
+        3. PARTNER STABILITY: The agent's estimate of its partner's strategy
+           has stopped changing.
+           
+        4. PERFORMANCE CONSISTENCY: Joint performance is stable and above a
+           minimum floor.
+        
+        Because each criterion depends on noisy observations (Weber-Law 
+        timing, stochastic game outcomes), the round at which ALL criteria
+        are simultaneously met varies naturally across random seeds.
+        
+        CG can be REVOKED if performance drops significantly after 
+        establishment (van der Meulen et al.'s "false CG" / Table 1).
+        """
+        if not self.use_tom:
+            return
+        
+        # --- CG Revocation ---
+        if self.cg_established:
+            recent_scores = list(self.score_history)[-10:]
+            if len(recent_scores) >= 10:
+                current_perf = np.mean(recent_scores)
+                if current_perf < self._cg_perf_at_establishment - 0.15:
+                    self.cg_established = False
+                    self.cg_round = None
+            return
+        
+        # Need enough history for meaningful stability assessment
+        window = 15
+        if len(self.wait_factor_history) < window:
+            return
+        
+        # --- Criterion 1: CONVERGENCE ---
+        initial_gap = abs(self.initial_wait_factor - 1.0)
+        current_gap = abs(self.wait_factor - self.partner_wait_factor_estimate)
+        
+        # Must close at least 60% of initial gap, with absolute cap of 0.35
+        # so very_different has a reachable target
+        convergence_threshold = min(0.35, max(0.10, initial_gap * 0.40))
+        if current_gap > convergence_threshold:
+            return
+        
+        # --- Criterion 2: OWN STABILITY ---
+        recent_wf = self.wait_factor_history[-window:]
+        if np.std(recent_wf) > 0.10:
             return
 
-        # 1. Own Stability
-        recent_wf = self.wait_factor_history[-15:]
-        wf_stable = np.std(recent_wf) < 0.12
+        # --- Criterion 3: PARTNER MODEL STABILITY ---
+        recent_partner = self.partner_estimate_history[-window:]
+        if np.std(recent_partner) > 0.12:
+            return
 
-        # 2. Partner Model Stability (ToM only)
-        if self.use_tom:
-            recent_partner = self.partner_estimate_history[-15:]
-            partner_stable = np.std(recent_partner) < 0.15
-        else:
-            partner_stable = True
-
-        # 3. Performance
-        recent_scores = list(self.score_history)[-15:]
-        perf_stable = np.mean(recent_scores) > 0.80
-
-        if wf_stable and partner_stable and perf_stable:
-            if not self.cg_established:
-                self.cg_established = True
-                self.cg_round = round_num
+        # --- Criterion 4: PERFORMANCE CONSISTENCY ---
+        recent_scores = list(self.score_history)[-window:]
+        if len(recent_scores) < window:
+            return
+        if np.std(recent_scores) > 0.08:
+            return
+        if np.mean(recent_scores) < 0.55:
+            return
+        
+        # All criteria met, establish CG
+        self.cg_established = True
+        self.cg_round = round_num
+        self._cg_perf_at_establishment = np.mean(recent_scores)
 
     def get_state(self) -> Dict:
         return {
